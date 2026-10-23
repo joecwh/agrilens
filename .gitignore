@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+server/data/
+client/android/
+client/ios/
+.DS_Store
+*.log

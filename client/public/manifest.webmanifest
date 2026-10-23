@@ -1,0 +1,9 @@
+{
+  "name": "AgriLens",
+  "short_name": "AgriLens",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f1ea",
+  "theme_color": "#1f3d2b",
+  "icons": []
+}

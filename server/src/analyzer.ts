@@ -32,28 +32,32 @@ export const AssessmentSchema = z.object({
 });
 export type Assessment = z.infer<typeof AssessmentSchema>;
 
-const TOOL: Anthropic.Tool = {
+// strict: true keeps the input schema-valid. Strict schemas need additionalProperties: false on every object and
+// don't accept numeric bounds, so those live in AssessmentSchema (zod) instead.
+const TOOL: Anthropic.Beta.BetaTool = {
   name: "report_plant_assessment",
   description: "Report the structured plant health assessment.",
+  strict: true,
   input_schema: {
     type: "object",
+    additionalProperties: false,
     required: ["summary", "overall_health", "health_score", "confidence", "growth_stage", "image_quality",
       "visual_findings", "issues", "recommendations", "trend_vs_previous", "follow_up"],
     properties: {
       summary: { type: "string", description: "2-3 sentence plain-language verdict for the grower." },
       overall_health: { type: "string", enum: ["healthy", "mild", "moderate", "severe"] },
-      health_score: { type: "integer", minimum: 0, maximum: 100 },
-      confidence: { type: "number", minimum: 0, maximum: 1, description: "Confidence in the diagnosis given photo quality and data." },
+      health_score: { type: "integer", description: "0-100" },
+      confidence: { type: "number", description: "0-1. Confidence in the diagnosis given photo quality and data." },
       growth_stage: { type: "string", description: "e.g. seedling, vegetative, flowering, fruiting" },
       image_quality: {
-        type: "object", required: ["usable", "issues"],
+        type: "object", additionalProperties: false, required: ["usable", "issues"],
         properties: { usable: { type: "boolean" }, issues: { type: "array", items: { type: "string" } } },
       },
       visual_findings: { type: "array", items: { type: "string" }, description: "What is actually visible in the photos." },
       issues: {
         type: "array",
         items: {
-          type: "object", required: ["name", "category", "likelihood", "evidence"],
+          type: "object", additionalProperties: false, required: ["name", "category", "likelihood", "evidence"],
           properties: {
             name: { type: "string" },
             category: { type: "string", enum: ["nutrient", "pest", "disease", "water", "environment", "other"] },
@@ -65,7 +69,7 @@ const TOOL: Anthropic.Tool = {
       recommendations: {
         type: "array",
         items: {
-          type: "object", required: ["priority", "action", "reason", "timeframe"],
+          type: "object", additionalProperties: false, required: ["priority", "action", "reason", "timeframe"],
           properties: {
             priority: { type: "string", enum: ["high", "medium", "low"] },
             action: { type: "string", description: "Concrete, doable step with quantities where sensible." },
@@ -76,7 +80,7 @@ const TOOL: Anthropic.Tool = {
       },
       trend_vs_previous: { type: ["string", "null"], description: "Comparison with the previous observation, or null if none." },
       follow_up: {
-        type: "object", required: ["recheck_in_days", "photo_tips"],
+        type: "object", additionalProperties: false, required: ["recheck_in_days", "photo_tips"],
         properties: { recheck_in_days: { type: "integer" }, photo_tips: { type: "array", items: { type: "string" } } },
       },
     },
@@ -140,7 +144,7 @@ export async function analyze(i: AnalysisInput): Promise<{ engine: string; resul
 
   const model = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
   const client = new Anthropic();
-  const images: Anthropic.ImageBlockParam[] = i.photos.slice(0, 5).map((p) => ({
+  const images: Anthropic.Beta.BetaImageBlockParam[] = i.photos.slice(0, 5).map((p) => ({
     type: "image",
     source: {
       type: "base64",
@@ -149,17 +153,23 @@ export async function analyze(i: AnalysisInput): Promise<{ engine: string; resul
     },
   }));
 
-  const msg = await client.messages.create({
+  // Current models reject forced tool_choice, so the prompt asks for the tool call and strict mode keeps it valid.
+  // Thinking is on by default and counts toward max_tokens, hence the headroom. fallbacks: "default" retries on
+  // another model if a safety classifier declines the request.
+  const msg = await client.beta.messages.create({
     model,
-    max_tokens: 2000,
+    max_tokens: 16000,
+    betas: ["server-side-fallback-2026-07-01"],
+    fallbacks: "default",
+    output_config: { effort: "medium" },
     tools: [TOOL],
-    tool_choice: { type: "tool", name: TOOL.name },
     messages: [{ role: "user", content: [...images, { type: "text", text: buildPrompt(i) }] }],
   });
 
-  const block = msg.content.find((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
-  if (!block) throw new Error("Model returned no assessment");
-  return { engine: `claude:${model}`, result: AssessmentSchema.parse(block.input) };
+  if (msg.stop_reason === "refusal") throw new Error("The model declined to assess this observation");
+  const block = msg.content.find((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
+  if (!block) throw new Error(`Model returned no assessment (stop_reason: ${msg.stop_reason})`);
+  return { engine: `claude:${msg.model}`, result: AssessmentSchema.parse(block.input) };
 }
 
 /** Deterministic fallback so the app works end-to-end without an API key. No image understanding. */
